@@ -12,20 +12,33 @@ const getUserId = (): string => {
 };
 
 const request = async (endpoint: string, body: any) => {
-    const res = await fetch(`${API_URL}/api${endpoint}`, {
-        method: 'POST',
-        headers: { 
-            'Content-Type': 'application/json', 
-            'x-user-id': getUserId() 
-        },
-        body: JSON.stringify(body)
-    });
-    return await res.json();
+    try {
+        const res = await fetch(`${API_URL}/api${endpoint}`, {
+            method: 'POST',
+            headers: { 
+                'Content-Type': 'application/json', 
+                'x-user-id': getUserId() 
+            },
+            body: JSON.stringify(body)
+        });
+        
+        if (!res.ok) {
+             throw new Error(`Server error: ${res.status}`);
+        }
+        return await res.json();
+    } catch (e) {
+        console.error(`Request to ${endpoint} failed:`, e);
+        throw e;
+    }
 };
 
 export const processQuickCommand = async (text: string, currentDate: string): Promise<QuickCommandResult> => {
   try {
     const result = await request('/analyze', { text });
+    // Safety: ensure responseMessage exists
+    if (result && !result.responseMessage) {
+        result.responseMessage = "Команда обработана.";
+    }
     return result;
   } catch (error) {
     console.error("AI Service Error:", error);
@@ -38,6 +51,8 @@ export const parseBudgetEntry = async (text: string): Promise<{amount: number, c
     const data = await request('/budget/analyze', { text });
     if (data && data.amount) {
       if (data.type) data.type = data.type.toLowerCase();
+      // Ensure date exists
+      if (!data.date) data.date = new Date().toISOString();
       return data;
     }
     return null;

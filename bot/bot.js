@@ -106,6 +106,12 @@ function formatUserContext(user) {
   `;
 }
 
+// Очистка JSON от лишних символов (Markdown ковычки)
+function cleanJson(text) {
+    if (!text) return "";
+    return text.replace(/```json/g, '').replace(/```/g, '').trim();
+}
+
 async function analyzeMessage(text, userData) {
   const humanDate = new Date().toLocaleString('ru-RU', { 
     timeZone: TIMEZONE, 
@@ -129,14 +135,38 @@ async function analyzeMessage(text, userData) {
           Role: You are Lana, a smart, friendly, and structured Personal Assistant.
           CURRENT DATE/TIME (${TIMEZONE}): ${humanDate}.
           ${dataContext}
-          YOUR GOAL: Analyze user input, decide ACTION, and generate a BEAUTIFUL response in Russian using Markdown V1.
-
-          POSSIBLE ACTIONS (Return JSON):
-          1. IF user wants to ADD/CREATE data: "create_event", "create_transaction", "create_task", "create_note".
-          2. IF user asks for LINK: "send_link".
-          3. IF user wants to CHAT: "chat".
           
-          For "create_transaction", extract "amount", "category", "type" (expense/income).
+          YOUR GOAL: Analyze user input and return STRICT JSON.
+
+          Possible Actions:
+          1. "create_task" (For todos, tasks)
+          2. "create_event" (For meetings, events with specific time)
+          3. "create_transaction" (For expenses, income, buying stuff)
+          4. "create_note" (For thoughts, ideas)
+          5. "send_link" (If user asks for the app link)
+          6. "chat" (For general conversation or if input is unclear)
+
+          JSON STRUCTURE MUST BE:
+          {
+            "action": "string",
+            "responseMessage": "string (Friendly answer in Russian)",
+            "data": {
+                // For create_task:
+                "title": "string", "priority": "High|Medium|Low"
+                
+                // For create_event:
+                "title": "string", "date": "ISO 8601 string (calculate based on user input and Current Date)"
+                
+                // For create_transaction:
+                "amount": number, "category": "string", "type": "expense|income", "description": "string"
+                
+                // For create_note:
+                "content": "string"
+            }
+          }
+
+          Example User: "Купил кофе за 300"
+          Example JSON: { "action": "create_transaction", "responseMessage": "Записала кофе в расходы.", "data": { "amount": 300, "category": "Еда", "type": "expense", "description": "Кофе", "date": "${new Date().toISOString()}" } }
           `
         },
         { role: "user", content: text }
@@ -144,11 +174,24 @@ async function analyzeMessage(text, userData) {
       response_format: { type: "json_object" }
     });
 
-    const content = completion.choices[0].message.content;
-    return JSON.parse(content);
+    const content = cleanJson(completion.choices[0].message.content);
+    console.log("AI Response:", content); // Debug log
+    const parsed = JSON.parse(content);
+    
+    // Ensure responseMessage exists
+    if (!parsed.responseMessage) {
+        parsed.responseMessage = "Готово!";
+    }
+    
+    return parsed;
   } catch (e) {
     console.error("AI Analysis Error", e);
-    return { action: 'chat', responseMessage: 'Прости, я немного запуталась 😔. Попробуй еще раз.' };
+    // Return a valid fallback object instead of throwing
+    return { 
+        action: 'chat', 
+        responseMessage: 'Прости, я немного запуталась 😔. Попробуй еще раз.',
+        data: {}
+    };
   }
 }
 
@@ -160,10 +203,11 @@ async function analyzeBudget(text) {
               {
                   role: "system",
                   content: `
-                  Role: Financial Assistant.
+                  Role: Financial Parser.
                   Current Date: ${new Date().toISOString()}.
-                  Task: Analyze text and extract transaction details.
-                  Return JSON:
+                  Task: Extract transaction details from text.
+                  
+                  OUTPUT JSON FORMAT:
                   {
                       "amount": number,
                       "category": "string (Short Russian category)",
@@ -171,15 +215,18 @@ async function analyzeBudget(text) {
                       "date": "ISO string",
                       "type": "income" | "expense"
                   }
-                  Keywords for Expense: купил, потратил, минус, оплатил, такси, еда.
-                  Keywords for Income: получил, зарплата, плюс, пришло, перевод.
+                  
+                  Keywords for Expense: купил, потратил, минус, оплатил.
+                  Keywords for Income: получил, зарплата, плюс, пришло.
+                  If unknown type, default to "expense".
                   `
               },
               { role: "user", content: text }
           ],
           response_format: { type: "json_object" }
       });
-      return JSON.parse(completion.choices[0].message.content);
+      const content = cleanJson(completion.choices[0].message.content);
+      return JSON.parse(content);
   } catch (e) {
       console.error("Budget AI Error", e);
       return null;
@@ -198,22 +245,6 @@ async function generateDashboardTip(summary) {
       return completion.choices[0].message.content.replace(/"/g, '');
   } catch (e) {
       return "Хорошего дня!";
-  }
-}
-
-async function generateMorningMotivation(eventsCount) {
-  try {
-    const completion = await ai.chat.completions.create({
-      model: MODEL_NAME,
-      messages: [
-        { role: "system", content: "You are a helpful assistant." },
-        { role: "user", content: `Generate a short morning greeting in Russian for a user with ${eventsCount} events. Use emojis.` }
-      ],
-      max_tokens: 150
-    });
-    return completion.choices[0].message.content;
-  } catch (e) {
-    return `Доброе утро! ☀️ У вас сегодня ${eventsCount} событий.`;
   }
 }
 
@@ -240,7 +271,7 @@ app.post('/api/analyze', requireUser, async (req, res) => {
     res.json(result);
   } catch (error) {
     console.error("API Analyze Error:", error);
-    res.status(500).json({ action: 'unknown', responseMessage: "Ошибка сервера." });
+    res.status(500).json({ action: 'unknown', responseMessage: "Ошибка сервера.", data: {} });
   }
 });
 
@@ -381,13 +412,14 @@ bot.on('text', async (ctx) => {
         else if (result.action === 'create_task') user.todos.push({ ...result.data, id, createdAt: Date.now(), completed: false });
         else if (result.action === 'create_note') user.notes.push({ ...result.data, id, createdAt: Date.now() });
         saveDb(db);
-        return replyWithFallback(ctx, result.responseMessage);
+        return replyWithFallback(ctx, result.responseMessage || "Готово!");
     } else {
-        return replyWithFallback(ctx, result.responseMessage || 'Что-то я не поняла.');
+        // Fallback for Chat action or Unknown
+        return replyWithFallback(ctx, result.responseMessage || 'Я тут!');
     }
   } catch (e) {
     console.error(e);
-    await ctx.reply('⚠️ Ошибка.');
+    await ctx.reply('⚠️ Произошла ошибка при обработке.');
   }
 });
 
